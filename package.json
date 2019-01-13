@@ -2,7 +2,7 @@
   "name": "safe_app_node",
   "version": "0.1.0",
   "description": "",
-  "main": "lib/index.js",
+  "main": "native/index.node",
   "dependencies": {
     "neon-cli": "^0.2.0"
   },

@@ -1,12 +1,14 @@
 {
   "name": "safe_app_node",
   "version": "0.1.0",
-  "description": "",
+  "description": "safe_app crate Node.js addon",
+  "repository": "https://github.com/b-zee/safe_app_node",
+  "license": "MIT",
   "main": "native/index.node",
   "dependencies": {
     "neon-cli": "^0.2.0"
   },
   "scripts": {
-    "install": "neon build"
+    "install": "RUST_SODIUM_DISABLE_PIE=1 neon build --release"
   }
 }

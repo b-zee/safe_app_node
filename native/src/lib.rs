@@ -27,7 +27,8 @@ fn app_pub_enc_key(mut cx: FunctionContext<'_>) -> JsResult<JsUndefined> {
     let app = cx.borrow(&app, |data| { data.as_slice::<u8>() });
     let app = u64::from_ne_bytes([app[0], app[1], app[2], app[3], app[4], app[5], app[6], app[7]]) as *const App;
 
-    let cx = Box::new(cx);
+    let fat_ptr = Box::new(cx);
+    let cx = Box::new(fat_ptr);
     let cx = Box::into_raw(cx) as *mut c_void;
 
     dbg!(cx);
@@ -40,7 +41,7 @@ fn app_pub_enc_key(mut cx: FunctionContext<'_>) -> JsResult<JsUndefined> {
         error: *const FfiResult,
         public_key_h: safe_app::ffi::object_cache::EncryptPubKeyHandle
     ) {
-        let mut cx: Box<FunctionContext> = unsafe { Box::from_raw(user_data as *mut _) };
+        let mut cx: Box<Box<FunctionContext>> = unsafe { Box::from_raw(user_data as *mut _) };
 
         dbg!(user_data);
         dbg!(cx.len()); // Sometimes correct, sometimes gibberish
@@ -72,15 +73,16 @@ fn test_create_app(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app_id = cx.argument::<JsString>(0)?.value();
     let app_id = CString::new(app_id).expect("CString::new failed");
 
-    let cxp = Box::new(cx);
+    let fat_ptr = Box::new(cx);
+    let cxp = Box::new(fat_ptr);
     let cxp = Box::into_raw(cxp) as *mut c_void;
 
     unsafe {
         safe_app::ffi::test_utils::test_create_app(app_id.as_ptr(), cxp, o_cb);
     }
     extern "C" fn o_cb(user_data: *mut c_void, error: *const FfiResult, o_app: *mut App) {
-        let cx: Box<FunctionContext> = unsafe { Box::from_raw(user_data as *mut _) };
-        let mut cx = *cx;
+        let mut cx: Box<Box<FunctionContext>> = unsafe { Box::from_raw(user_data as *mut _) };
+        let mut cx = **cx; // Removing this line causes errors further along
 
         let f = cx.argument::<JsFunction>(1).unwrap();
         let arg1 = cx.number(unsafe { (*error).error_code });

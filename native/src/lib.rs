@@ -19,6 +19,7 @@ use safe_core::btree_set;
 use safe_core::ipc::Permission;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::mem;
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::sync::mpsc;
@@ -54,12 +55,12 @@ where
     rx.recv().unwrap()
 }
 
-extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, app: T) {
+extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T) {
     let tx = user_data as *mut mpsc::Sender<Result<T, (i32, String)>>;
 
     unsafe {
         (*tx).send(match (*res).error_code {
-            0 => Ok(app),
+            0 => Ok(o_arg),
             _ => Err((
                 (*res).error_code,
                 String::from(CStr::from_ptr((*res).description).to_str().unwrap()),
@@ -82,18 +83,18 @@ struct SafeTask {
     app_id: String,
 }
 impl Task for SafeTask {
-    type Output = u64;
+    type Output = [u8; mem::size_of::<usize>()];
     type Error = (i32, String);
     type JsEvent = JsArrayBuffer;
 
-    fn perform(&self) -> Result<u64, (i32, String)> {
+    fn perform(&self) -> Result<Self::Output, Self::Error> {
         let app_id = CString::new(self.app_id.clone()).expect("CString::new failed");
         let app_id = app_id.as_ptr();
 
         let app: Result<*mut App, _> = join_cb(|ud, cb| unsafe { test_create_app(app_id, ud, cb) });
 
         match app {
-            Ok(app) => Ok(app as u64),
+            Ok(app) => Ok((app as usize).to_ne_bytes()),
             Err(err) => Err(err),
         }
     }
@@ -101,26 +102,26 @@ impl Task for SafeTask {
     fn complete<'a>(
         self,
         mut cx: TaskContext<'a>,
-        result: Result<u64, (i32, String)>,
+        result: Result<Self::Output, Self::Error>,
     ) -> JsResult<JsArrayBuffer> {
         match result {
-            Ok(app_h) => {
-                let mut buf =
-                    JsArrayBuffer::new(&mut cx, std::mem::size_of::<*mut App>() as u32).unwrap();
+            Ok(app) => {
+                let mut buf = JsArrayBuffer::new(&mut cx, app.len() as u32).unwrap();
+
                 cx.borrow_mut(&mut buf, |data| {
-                    let slice = (app_h as u64).to_ne_bytes();
-                    data.as_mut_slice::<u8>().clone_from_slice(&slice);
+                    data.as_mut_slice::<u8>().clone_from_slice(&app);
                 });
+
                 Ok(buf)
             }
             Err(err) => {
+                let js_err = cx.error(err.1).unwrap();
+
+                // Add an `error_code` property to Error
                 let code = cx.number(err.0);
+                js_err.set(&mut cx, "error_code", code).unwrap();
 
-                let err = cx.error(err.1).unwrap();
-                // Add a `error_code` property to Error
-                err.set(&mut cx, "error_code", code).unwrap();
-
-                cx.throw(err)
+                cx.throw(js_err)
             }
         }
     }

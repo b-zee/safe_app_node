@@ -79,9 +79,39 @@ fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(JsUndefined::new())
 }
 
+/// A type to aid converting between foreign types.
+struct NewType<T>(T);
+
+impl From<[u8; mem::size_of::<usize>()]> for NewType<*mut App> {
+    fn from(bytes: [u8; mem::size_of::<usize>()]) -> Self {
+        NewType(usize::from_ne_bytes(bytes) as *mut App)
+    }
+}
+
+impl From<*mut App> for NewType<[u8; mem::size_of::<usize>()]> {
+    fn from(app: *mut App) -> Self {
+        NewType((app as usize).to_ne_bytes())
+    }
+}
+
+impl<'a> From<(&mut TaskContext<'a>, [u8; mem::size_of::<usize>()])>
+    for NewType<Handle<'a, JsArrayBuffer>>
+{
+    fn from(thing: (&mut TaskContext<'a>, [u8; mem::size_of::<usize>()])) -> Self {
+        let mut b = JsArrayBuffer::new(thing.0, mem::size_of::<usize>() as u32).unwrap();
+
+        thing.0.borrow_mut(&mut b, |data| {
+            data.as_mut_slice::<u8>().clone_from_slice(&thing.1);
+        });
+
+        NewType(b)
+    }
+}
+
 struct SafeTask {
     app_id: String,
 }
+
 impl Task for SafeTask {
     type Output = [u8; mem::size_of::<usize>()];
     type Error = (i32, String);
@@ -91,10 +121,10 @@ impl Task for SafeTask {
         let app_id = CString::new(self.app_id.clone()).expect("CString::new failed");
         let app_id = app_id.as_ptr();
 
-        let app: Result<*mut App, _> = join_cb(|ud, cb| unsafe { test_create_app(app_id, ud, cb) });
+        let app = join_cb(|ud, cb| unsafe { test_create_app(app_id, ud, cb) });
 
         match app {
-            Ok(app) => Ok((app as usize).to_ne_bytes()),
+            Ok(app) => Ok(NewType::from(app).0),
             Err(err) => Err(err),
         }
     }
@@ -103,17 +133,9 @@ impl Task for SafeTask {
         self,
         mut cx: TaskContext<'a>,
         result: Result<Self::Output, Self::Error>,
-    ) -> JsResult<JsArrayBuffer> {
+    ) -> JsResult<Self::JsEvent> {
         match result {
-            Ok(app) => {
-                let mut buf = JsArrayBuffer::new(&mut cx, app.len() as u32).unwrap();
-
-                cx.borrow_mut(&mut buf, |data| {
-                    data.as_mut_slice::<u8>().clone_from_slice(&app);
-                });
-
-                Ok(buf)
-            }
+            Ok(app) => Ok(NewType::from((&mut cx, app)).0),
             Err(err) => {
                 let js_err = cx.error(err.1).unwrap();
 

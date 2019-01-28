@@ -38,22 +38,40 @@ fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let f = cx.argument::<JsFunction>(1).unwrap();
 
-    let task = SafeTask {
+    let task = SafeTask::<EncryptPubKeyHandle> {
         f: Box::new(move || {
             join_cb(|ud, cb| unsafe { app_pub_enc_key(app as *const App, ud, cb) })
         }),
     };
     task.schedule(f);
-    // let key: Result<EncryptPubKeyHandle, (i32, String)> =
-    //     unsafe { join_cb(|ud, cb| app_pub_enc_key(app, ud, cb)) };
 
     Ok(JsUndefined::new())
+}
+
+trait MyReprC {
+    type C;
+
+    fn from_c(val: Self::C) -> Self;
+}
+impl MyReprC for u64 {
+    type C = u64;
+
+    fn from_c(val: Self::C) -> Self {
+        val
+    }
+}
+impl<T> MyReprC for *mut T {
+    type C = *mut T;
+    fn from_c(val: Self::C) -> Self {
+        val
+    }
 }
 
 /// Call FFI and wait for callback to pass back value(s)
 fn join_cb<F, T>(f: F) -> Result<T, (i32, String)>
 where
-    F: FnOnce(*mut c_void, extern "C" fn(*mut c_void, *const FfiResult, T)),
+    F: FnOnce(*mut c_void, extern "C" fn(*mut c_void, *const FfiResult, T::C)),
+    T: MyReprC,
 {
     let (tx, rx) = std::sync::mpsc::channel::<Result<T, (i32, String)>>();
     let txp = &tx as *const _ as *mut c_void;
@@ -63,12 +81,15 @@ where
     rx.recv().unwrap()
 }
 
-extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T) {
+extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T::C)
+where
+    T: MyReprC,
+{
     let tx = user_data as *mut mpsc::Sender<Result<T, (i32, String)>>;
 
     unsafe {
         (*tx).send(match (*res).error_code {
-            0 => Ok(o_arg),
+            0 => Ok(T::from_c(o_arg)),
             _ => Err((
                 (*res).error_code,
                 String::from(CStr::from_ptr((*res).description).to_str().unwrap()),
@@ -83,7 +104,7 @@ fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let f = cx.argument::<JsFunction>(1).unwrap();
 
-    let task = SafeTask {
+    let task = SafeTask::<*mut App> {
         f: Box::new(move || join_cb(|ud, cb| unsafe { test_create_app(app_id.as_ptr(), ud, cb) })),
     };
     task.schedule(f);
@@ -177,7 +198,6 @@ register_module!(mut cx, {
     cx.export_function("app_is_mock", app_is_mock_js)?;
     cx.export_function("app_pub_enc_key", app_pub_enc_key_js)?;
     cx.export_function("test_create_app", test_create_app_js)?;
-    // cx.export_function("test_create_app_sync", test_create_app_js_sync)?;
 
     Ok(())
 });

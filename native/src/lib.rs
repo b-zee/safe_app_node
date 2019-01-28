@@ -1,27 +1,16 @@
-#![allow(dead_code)]
-#![allow(unused)]
-
 extern crate ffi_utils;
 #[macro_use]
 extern crate neon;
 extern crate safe_app;
 extern crate safe_core;
 
-use ffi_utils::test_utils::call_1;
 use ffi_utils::FfiResult;
 use neon::prelude::*;
 use safe_app::ffi::crypto::app_pub_enc_key;
-use safe_app::ffi::object_cache::EncryptPubKeyHandle;
 use safe_app::ffi::test_utils::test_create_app;
-use safe_app::test_utils::create_auth_req;
 use safe_app::App;
-use safe_core::btree_set;
-use safe_core::ipc::Permission;
-use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::mem;
-use std::os::raw::{c_char, c_void};
-use std::ptr;
+use std::os::raw::c_void;
 use std::sync::mpsc;
 
 fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -46,11 +35,11 @@ fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // Convert array buffer into App pointer
     let app = cx.argument::<JsArrayBuffer>(0)?;
     let app = cx.borrow(&app, |data| data.as_slice::<u8>());
-    let app = usize::from_ne_bytes([
-        app[0], app[1], app[2], app[3], app[4], app[5], app[6], app[7],
-    ]);
+    let mut x: [u8; 8] = [0; 8];
+    x.copy_from_slice(app);
+    let app = usize::from_ne_bytes(x);
 
-    let f = cx.argument::<JsFunction>(1).unwrap();
+    let f = cx.argument::<JsFunction>(1)?;
 
     let task = SafeTask {
         f: Box::new(move || {
@@ -89,6 +78,76 @@ fn enc_pub_key_get_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(JsUndefined::new())
 }
 
+/// Call FFI and wait for callback to pass back value(s)
+fn join_cb<F, T>(f: F) -> Result<T::Primitive, (i32, String)>
+where
+    F: FnOnce(*mut c_void, extern "C" fn(*mut c_void, *const FfiResult, T)),
+    T: RawToPrimitive,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<Result<T::Primitive, (i32, String)>>();
+    let txp = &tx as *const _ as *mut c_void;
+
+    f(txp, cb::<T>);
+
+    rx.recv().unwrap()
+}
+
+extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T)
+where
+    T: RawToPrimitive,
+{
+    let tx = user_data as *mut mpsc::Sender<Result<T::Primitive, (i32, String)>>;
+
+    unsafe {
+        (*tx)
+            .send(match (*res).error_code {
+                0 => Ok(o_arg.to_rust()),
+                _ => Err((
+                    (*res).error_code,
+                    String::from(CStr::from_ptr((*res).description).to_str().unwrap()),
+                )),
+            })
+            .unwrap();
+    }
+}
+
+struct SafeTask<T> {
+    f: Box<Fn() -> Result<T, (i32, String)> + Send + 'static>,
+}
+
+impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
+    type Output = Wrapper<T>;
+    type Error = (i32, String);
+    type JsEvent = T::Js;
+
+    fn perform(&self) -> Result<Self::Output, Self::Error> {
+        // Call the blocking closure
+        let result = (self.f)();
+
+        // Wrap value to allow sending !Send types (e.g. pointers)
+        result.map(|v| Wrapper(v))
+    }
+
+    fn complete<'a>(
+        self,
+        mut cx: TaskContext<'a>,
+        result: Result<Self::Output, Self::Error>,
+    ) -> JsResult<Self::JsEvent> {
+        match result {
+            Ok(app) => Ok(app.0.to_js(&mut cx)),
+            Err(err) => {
+                let js_err = cx.error(err.1).unwrap();
+
+                // Add an `error_code` property to Error
+                let code = cx.number(err.0);
+                js_err.set(&mut cx, "error_code", code).unwrap();
+
+                cx.throw(js_err)
+            }
+        }
+    }
+}
+
 trait RawToPrimitive {
     type Primitive;
 
@@ -116,162 +175,48 @@ impl RawToPrimitive for *const [u8; 32] {
     }
 }
 
-/// Call FFI and wait for callback to pass back value(s)
-fn join_cb<F, T>(f: F) -> Result<T::Primitive, (i32, String)>
-where
-    F: FnOnce(*mut c_void, extern "C" fn(*mut c_void, *const FfiResult, T)),
-    T: RawToPrimitive,
-{
-    let (tx, rx) = std::sync::mpsc::channel::<Result<T::Primitive, (i32, String)>>();
-    let txp = &tx as *const _ as *mut c_void;
-
-    f(txp, cb::<T>);
-
-    rx.recv().unwrap()
-}
-
-extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T)
-where
-    T: RawToPrimitive,
-{
-    let tx = user_data as *mut mpsc::Sender<Result<T::Primitive, (i32, String)>>;
-
-    unsafe {
-        (*tx).send(match (*res).error_code {
-            0 => Ok(o_arg.to_rust()),
-            _ => Err((
-                (*res).error_code,
-                String::from(CStr::from_ptr((*res).description).to_str().unwrap()),
-            )),
-        });
-    }
-}
-
-/// A type to aid converting between foreign types.
-struct NewType<T>(T);
-
-impl From<[u8; mem::size_of::<usize>()]> for NewType<*mut App> {
-    fn from(bytes: [u8; mem::size_of::<usize>()]) -> Self {
-        NewType(usize::from_ne_bytes(bytes) as *mut App)
-    }
-}
-
-impl From<*mut App> for NewType<[u8; mem::size_of::<usize>()]> {
-    fn from(app: *mut App) -> Self {
-        NewType((app as usize).to_ne_bytes())
-    }
-}
-
-impl<'a> From<(&mut TaskContext<'a>, [u8; mem::size_of::<usize>()])>
-    for NewType<Handle<'a, JsArrayBuffer>>
-{
-    fn from(thing: (&mut TaskContext<'a>, [u8; mem::size_of::<usize>()])) -> Self {
-        let mut b = JsArrayBuffer::new(thing.0, mem::size_of::<usize>() as u32).unwrap();
-
-        thing.0.borrow_mut(&mut b, |data| {
-            data.as_mut_slice::<u8>().clone_from_slice(&thing.1);
-        });
-
-        NewType(b)
-    }
-}
-
-fn mytestfnc<'a>(c: &mut TaskContext<'a>, s: &[u8]) -> Handle<'a, JsArrayBuffer> {
-    let mut x = JsArrayBuffer::new(c, s.len() as u32);
-    let mut x = x.unwrap();
-    c.borrow_mut(&mut x, |data| {
-        data.as_mut_slice::<u8>().clone_from_slice(s);
-    });
-
-    x
-}
-
-struct SafeTask<T> {
-    f: Box<Fn() -> Result<T, (i32, String)> + Send + 'static>,
-}
-
-enum MyResult {
-    Pointer(usize),
-    U64([u8; 8]),
-    Bytes([u8; 32]),
-}
-impl From<*mut App> for MyResult {
-    fn from(app: *mut App) -> Self {
-        MyResult::Pointer(app as usize)
-    }
-}
-impl From<u64> for MyResult {
-    fn from(u: u64) -> Self {
-        MyResult::U64(u.to_ne_bytes())
-    }
-}
-
-impl From<[u8; 32]> for MyResult {
-    fn from(u: [u8; 32]) -> Self {
-        MyResult::Bytes(u)
-    }
-}
+struct Wrapper<T>(T);
+unsafe impl<T> Send for Wrapper<T> {}
 
 trait PrimitiveToJs {
     type Js: Value;
 
     fn to_js<'a>(self, c: &mut TaskContext<'a>) -> Handle<'a, Self::Js>;
+
+    /// Helper function for converting slices to ArrayBuffer
+    fn slice_to_array<'a>(c: &mut TaskContext<'a>, s: &[u8]) -> Handle<'a, JsArrayBuffer> {
+        let x = JsArrayBuffer::new(c, s.len() as u32);
+        let mut x = x.unwrap();
+        c.borrow_mut(&mut x, |data| {
+            data.as_mut_slice::<u8>().clone_from_slice(s);
+        });
+
+        x
+    }
 }
 impl PrimitiveToJs for u64 {
     type Js = JsArrayBuffer;
 
     fn to_js<'a>(self, c: &mut TaskContext<'a>) -> Handle<'a, Self::Js> {
         let bytes = self.to_ne_bytes();
-        let mut x = JsArrayBuffer::new(c, bytes.len() as u32);
-        let mut x = x.unwrap();
-        c.borrow_mut(&mut x, |data| {
-            data.as_mut_slice::<u8>().clone_from_slice(&bytes);
-        });
-
-        x
+        Self::slice_to_array(c, &bytes)
     }
 }
 
-impl<T: Into<MyResult> + 'static> Task for SafeTask<T> {
-    type Output = MyResult;
-    type Error = (i32, String);
-    type JsEvent = JsArrayBuffer;
+impl<T> PrimitiveToJs for *mut T {
+    type Js = JsArrayBuffer;
 
-    fn perform(&self) -> Result<Self::Output, Self::Error> {
-        let app = (self.f)();
-
-        app.map(|v| v.into())
+    fn to_js<'a>(self, c: &mut TaskContext<'a>) -> Handle<'a, Self::Js> {
+        let bytes = (self as usize).to_ne_bytes();
+        Self::slice_to_array(c, &bytes)
     }
+}
 
-    fn complete<'a>(
-        self,
-        mut cx: TaskContext<'a>,
-        result: Result<Self::Output, Self::Error>,
-    ) -> JsResult<Self::JsEvent> {
-        match result {
-            Ok(app) => match app {
-                MyResult::Pointer(ptr) => Ok(NewType::from((&mut cx, ptr.to_ne_bytes())).0),
-                MyResult::U64(u) => Ok(NewType::from((&mut cx, u)).0),
-                MyResult::Bytes(u) => {
-                    let mut b = JsArrayBuffer::new(&mut cx, u.len() as u32).unwrap();
+impl PrimitiveToJs for [u8; 32] {
+    type Js = JsArrayBuffer;
 
-                    cx.borrow_mut(&mut b, |data| {
-                        data.as_mut_slice::<u8>().clone_from_slice(&u);
-                    });
-
-                    Ok(b)
-                }
-            },
-            Err(err) => {
-                let js_err = cx.error(err.1).unwrap();
-
-                // Add an `error_code` property to Error
-                let code = cx.number(err.0);
-                js_err.set(&mut cx, "error_code", code).unwrap();
-
-                cx.throw(js_err)
-            }
-        }
+    fn to_js<'a>(self, c: &mut TaskContext<'a>) -> Handle<'a, Self::Js> {
+        Self::slice_to_array(c, &self)
     }
 }
 

@@ -7,6 +7,7 @@ extern crate safe_core;
 use ffi_utils::FfiResult;
 use neon::prelude::*;
 use safe_app::ffi::crypto::app_pub_enc_key;
+use safe_app::ffi::crypto::enc_pub_key_get;
 use safe_app::ffi::test_utils::test_create_app;
 use safe_app::App;
 use std::ffi::{CStr, CString};
@@ -17,10 +18,10 @@ fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app = Wrapper::<CString>::from((&mut cx, 0));
     let jsf = cx.argument::<JsFunction>(1)?;
 
-    let task = SafeTask {
-        f: Box::new(move || join_cb(|ud, cb| unsafe { test_create_app(app.0.as_ptr(), ud, cb) })),
-    };
-    task.schedule(jsf);
+    SafeTask(Box::new(move || {
+        join_cb(|ud, cb| unsafe { test_create_app(app.0.as_ptr(), ud, cb) })
+    }))
+    .schedule(jsf);
 
     Ok(JsUndefined::new())
 }
@@ -33,10 +34,10 @@ fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app = Wrapper::<*const App>::from((&mut cx, 0));
     let jsf = cx.argument::<JsFunction>(1)?;
 
-    let task = SafeTask {
-        f: Box::new(move || join_cb(|ud, cb| unsafe { app_pub_enc_key(app.0, ud, cb) })),
-    };
-    task.schedule(jsf);
+    SafeTask(Box::new(move || {
+        join_cb(|ud, cb| unsafe { app_pub_enc_key(app.0, ud, cb) })
+    }))
+    .schedule(jsf);
 
     Ok(JsUndefined::new())
 }
@@ -46,11 +47,10 @@ fn enc_pub_key_get_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let key = Wrapper::<u64>::from((&mut cx, 1));
     let jsf = cx.argument::<JsFunction>(2)?;
 
-    use safe_app::ffi::crypto::enc_pub_key_get;
-    let task = SafeTask {
-        f: Box::new(move || join_cb(|ud, cb| unsafe { enc_pub_key_get(app.0, key.0, ud, cb) })),
-    };
-    task.schedule(jsf);
+    SafeTask(Box::new(move || {
+        join_cb(|ud, cb| unsafe { enc_pub_key_get(app.0, key.0, ud, cb) })
+    }))
+    .schedule(jsf);
 
     Ok(JsUndefined::new())
 }
@@ -121,9 +121,7 @@ impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<CString> {
     }
 }
 
-struct SafeTask<T> {
-    f: Box<Fn() -> Result<T, (i32, String)> + Send + 'static>,
-}
+struct SafeTask<T>(Box<Fn() -> Result<T, (i32, String)> + Send>);
 
 impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
     type Output = Wrapper<T>;
@@ -132,7 +130,7 @@ impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
 
     fn perform(&self) -> Result<Self::Output, Self::Error> {
         // Call the blocking closure
-        let result = (self.f)();
+        let result = (self.0)();
 
         // Wrap value to allow sending !Send types (e.g. pointers)
         result.map(|v| Wrapper(v))

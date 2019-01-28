@@ -6,6 +6,7 @@ extern crate safe_core;
 
 use ffi_utils::FfiResult;
 use neon::prelude::*;
+use safe_app::ffi::app_container_name;
 use safe_app::ffi::crypto::app_pub_enc_key;
 use safe_app::ffi::crypto::enc_pub_key_get;
 use safe_app::ffi::test_utils::test_create_app;
@@ -28,6 +29,18 @@ fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 fn app_is_mock_js(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     Ok(cx.boolean(safe_app::app_is_mock()))
+}
+
+fn app_container_name_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let app = Wrapper::<CString>::from((&mut cx, 0));
+    let jsf = cx.argument::<JsFunction>(1)?;
+
+    SafeTask(Box::new(move || {
+        join_cb(|ud, cb| unsafe { app_container_name(app.0.as_ptr(), ud, cb) })
+    }))
+    .schedule(jsf);
+
+    Ok(JsUndefined::new())
 }
 
 fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -182,6 +195,14 @@ impl RawToPrimitive for *const [u8; 32] {
         (unsafe { *self }) as [u8; 32]
     }
 }
+use std::os::raw::c_char;
+impl RawToPrimitive for *const c_char {
+    type Primitive = String;
+
+    fn to_rust(self) -> Self::Primitive {
+        unsafe { CStr::from_ptr(self) }.to_str().unwrap().to_owned()
+    }
+}
 
 struct Wrapper<T>(T);
 unsafe impl<T> Send for Wrapper<T> {}
@@ -228,8 +249,17 @@ impl PrimitiveToJs for [u8; 32] {
     }
 }
 
+impl PrimitiveToJs for String {
+    type Js = JsString;
+
+    fn to_js<'a>(self, c: &mut TaskContext<'a>) -> Handle<'a, Self::Js> {
+        JsString::new(c, self)
+    }
+}
+
 register_module!(mut cx, {
     cx.export_function("app_is_mock", app_is_mock_js)?;
+    cx.export_function("app_container_name", app_container_name_js)?;
     cx.export_function("app_pub_enc_key", app_pub_enc_key_js)?;
     cx.export_function("enc_pub_key_get", enc_pub_key_get_js)?;
     cx.export_function("test_create_app", test_create_app_js)?;

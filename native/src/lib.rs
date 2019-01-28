@@ -14,15 +14,13 @@ use std::os::raw::c_void;
 use std::sync::mpsc;
 
 fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let app_id = cx.argument::<JsString>(0)?.value();
-    let app_id = CString::new(app_id.clone()).expect("CString::new failed");
-
-    let f = cx.argument::<JsFunction>(1).unwrap();
+    let app = Wrapper::<CString>::from((&mut cx, 0));
+    let jsf = cx.argument::<JsFunction>(1)?;
 
     let task = SafeTask {
-        f: Box::new(move || join_cb(|ud, cb| unsafe { test_create_app(app_id.as_ptr(), ud, cb) })),
+        f: Box::new(move || join_cb(|ud, cb| unsafe { test_create_app(app.0.as_ptr(), ud, cb) })),
     };
-    task.schedule(f);
+    task.schedule(jsf);
 
     Ok(JsUndefined::new())
 }
@@ -32,48 +30,27 @@ fn app_is_mock_js(mut cx: FunctionContext) -> JsResult<JsBoolean> {
 }
 
 fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    // Convert array buffer into App pointer
-    let app = cx.argument::<JsArrayBuffer>(0)?;
-    let app = cx.borrow(&app, |data| data.as_slice::<u8>());
-    let mut x: [u8; 8] = [0; 8];
-    x.copy_from_slice(app);
-    let app = usize::from_ne_bytes(x);
-
-    let f = cx.argument::<JsFunction>(1)?;
+    let app = Wrapper::<*const App>::from((&mut cx, 0));
+    let jsf = cx.argument::<JsFunction>(1)?;
 
     let task = SafeTask {
-        f: Box::new(move || {
-            join_cb(|ud, cb| unsafe { app_pub_enc_key(app as *const App, ud, cb) })
-        }),
+        f: Box::new(move || join_cb(|ud, cb| unsafe { app_pub_enc_key(app.0, ud, cb) })),
     };
-    task.schedule(f);
+    task.schedule(jsf);
 
     Ok(JsUndefined::new())
 }
 
 fn enc_pub_key_get_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    // Convert array buffer into App pointer
-    let app = cx.argument::<JsArrayBuffer>(0)?;
-    let app = cx.borrow(&app, |data| data.as_slice::<u8>());
-    let app = usize::from_ne_bytes([
-        app[0], app[1], app[2], app[3], app[4], app[5], app[6], app[7],
-    ]);
-
-    let key = cx.argument::<JsArrayBuffer>(1)?;
-    let key = cx.borrow(&key, |data| data.as_slice::<u8>());
-    let key = usize::from_ne_bytes([
-        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-    ]);
-
-    let f = cx.argument::<JsFunction>(2).unwrap();
+    let app = Wrapper::<*const App>::from((&mut cx, 0));
+    let key = Wrapper::<u64>::from((&mut cx, 1));
+    let jsf = cx.argument::<JsFunction>(2)?;
 
     use safe_app::ffi::crypto::enc_pub_key_get;
     let task = SafeTask {
-        f: Box::new(move || {
-            join_cb(|ud, cb| unsafe { enc_pub_key_get(app as *const App, key as u64, ud, cb) })
-        }),
+        f: Box::new(move || join_cb(|ud, cb| unsafe { enc_pub_key_get(app.0, key.0, ud, cb) })),
     };
-    task.schedule(f);
+    task.schedule(jsf);
 
     Ok(JsUndefined::new())
 }
@@ -108,6 +85,39 @@ where
                 )),
             })
             .unwrap();
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<*const App> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<*const App> {
+        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
+        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
+
+        let mut x = [0u8; std::mem::size_of::<usize>()];
+        x.copy_from_slice(app);
+
+        Wrapper(usize::from_ne_bytes(x) as *const App)
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<u64> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<u64> {
+        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
+        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
+
+        let mut x = [0u8; std::mem::size_of::<u64>()];
+        x.copy_from_slice(app);
+
+        Wrapper(u64::from_ne_bytes(x))
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<CString> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<CString> {
+        let s = ci.0.argument::<JsString>(ci.1).unwrap().value();
+        let s = CString::new(s.clone()).expect("CString::new failed");
+
+        Wrapper(s)
     }
 }
 

@@ -32,12 +32,20 @@ fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // Convert array buffer into App pointer
     let app = cx.argument::<JsArrayBuffer>(0)?;
     let app = cx.borrow(&app, |data| data.as_slice::<u8>());
-    let app = u64::from_ne_bytes([
+    let app = usize::from_ne_bytes([
         app[0], app[1], app[2], app[3], app[4], app[5], app[6], app[7],
-    ]) as *const App;
+    ]);
 
-    let key: Result<EncryptPubKeyHandle, (i32, String)> =
-        unsafe { join_cb(|ud, cb| app_pub_enc_key(app, ud, cb)) };
+    let f = cx.argument::<JsFunction>(1).unwrap();
+
+    let task = SafeTask {
+        f: Box::new(move || {
+            join_cb(|ud, cb| unsafe { app_pub_enc_key(app as *const App, ud, cb) })
+        }),
+    };
+    task.schedule(f);
+    // let key: Result<EncryptPubKeyHandle, (i32, String)> =
+    //     unsafe { join_cb(|ud, cb| app_pub_enc_key(app, ud, cb)) };
 
     Ok(JsUndefined::new())
 }
@@ -71,9 +79,13 @@ extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T) {
 
 fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app_id = cx.argument::<JsString>(0)?.value();
+    let app_id = CString::new(app_id.clone()).expect("CString::new failed");
+
     let f = cx.argument::<JsFunction>(1).unwrap();
 
-    let task = SafeTask { app_id };
+    let task = SafeTask {
+        f: Box::new(move || join_cb(|ud, cb| unsafe { test_create_app(app_id.as_ptr(), ud, cb) })),
+    };
     task.schedule(f);
 
     Ok(JsUndefined::new())
@@ -108,25 +120,34 @@ impl<'a> From<(&mut TaskContext<'a>, [u8; mem::size_of::<usize>()])>
     }
 }
 
-struct SafeTask {
-    app_id: String,
+struct SafeTask<T> {
+    f: Box<Fn() -> Result<T, (i32, String)> + Send + 'static>,
 }
 
-impl Task for SafeTask {
-    type Output = [u8; mem::size_of::<usize>()];
+enum MyResult {
+    Pointer(usize),
+    U64([u8; 8]),
+}
+impl From<*mut App> for MyResult {
+    fn from(app: *mut App) -> Self {
+        MyResult::Pointer(app as usize)
+    }
+}
+impl From<u64> for MyResult {
+    fn from(u: u64) -> Self {
+        MyResult::U64(u.to_ne_bytes())
+    }
+}
+
+impl<T: Into<MyResult> + 'static> Task for SafeTask<T> {
+    type Output = MyResult;
     type Error = (i32, String);
     type JsEvent = JsArrayBuffer;
 
     fn perform(&self) -> Result<Self::Output, Self::Error> {
-        let app_id = CString::new(self.app_id.clone()).expect("CString::new failed");
-        let app_id = app_id.as_ptr();
+        let app = (self.f)();
 
-        let app = join_cb(|ud, cb| unsafe { test_create_app(app_id, ud, cb) });
-
-        match app {
-            Ok(app) => Ok(NewType::from(app).0),
-            Err(err) => Err(err),
-        }
+        app.map(|v| v.into())
     }
 
     fn complete<'a>(
@@ -135,7 +156,10 @@ impl Task for SafeTask {
         result: Result<Self::Output, Self::Error>,
     ) -> JsResult<Self::JsEvent> {
         match result {
-            Ok(app) => Ok(NewType::from((&mut cx, app)).0),
+            Ok(app) => match app {
+                MyResult::Pointer(ptr) => Ok(NewType::from((&mut cx, ptr.to_ne_bytes())).0),
+                MyResult::U64(u) => Ok(NewType::from((&mut cx, u)).0),
+            },
             Err(err) => {
                 let js_err = cx.error(err.1).unwrap();
 

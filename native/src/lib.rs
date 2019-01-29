@@ -4,23 +4,22 @@ extern crate neon;
 extern crate safe_app;
 extern crate safe_core;
 
-use ffi_utils::FfiResult;
+use ffi_utils::test_utils::call_1;
 use neon::prelude::*;
 use safe_app::ffi::app_container_name;
 use safe_app::ffi::crypto::app_pub_enc_key;
 use safe_app::ffi::crypto::enc_pub_key_get;
+use safe_app::ffi::object_cache::EncryptPubKeyHandle;
 use safe_app::ffi::test_utils::test_create_app;
 use safe_app::App;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_void;
-use std::sync::mpsc;
+use std::ffi::CString;
 
 fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app = Wrapper::<CString>::from((&mut cx, 0));
     let jsf = cx.argument::<JsFunction>(1)?;
 
-    SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { test_create_app(app.as_ptr(), ud, cb) })
+    SafeTask(Box::new(move || unsafe {
+        call_1::<_, _, *mut App>(|ud, cb| test_create_app(app.as_ptr(), ud, cb))
     }))
     .schedule(jsf);
 
@@ -35,8 +34,8 @@ fn app_container_name_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app = Wrapper::<CString>::from((&mut cx, 0));
     let jsf = cx.argument::<JsFunction>(1)?;
 
-    SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { app_container_name(app.as_ptr(), ud, cb) })
+    SafeTask(Box::new(move || unsafe {
+        call_1::<_, _, String>(|ud, cb| app_container_name(app.as_ptr(), ud, cb))
     }))
     .schedule(jsf);
 
@@ -47,8 +46,8 @@ fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let app = Wrapper::<*const App>::from((&mut cx, 0));
     let jsf = cx.argument::<JsFunction>(1)?;
 
-    SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { app_pub_enc_key(app.0, ud, cb) })
+    SafeTask(Box::new(move || unsafe {
+        call_1::<_, _, EncryptPubKeyHandle>(|ud, cb| app_pub_enc_key(app.0, ud, cb))
     }))
     .schedule(jsf);
 
@@ -60,45 +59,12 @@ fn enc_pub_key_get_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let key = Wrapper::<u64>::from((&mut cx, 1));
     let jsf = cx.argument::<JsFunction>(2)?;
 
-    SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { enc_pub_key_get(app.0, key.0, ud, cb) })
+    SafeTask(Box::new(move || unsafe {
+        call_1::<_, _, [u8; 32]>(|ud, cb| enc_pub_key_get(app.0, key.0, ud, cb))
     }))
     .schedule(jsf);
 
     Ok(JsUndefined::new())
-}
-
-/// Call FFI and wait for callback to pass back value(s)
-fn join_cb<F, T>(f: F) -> Result<T::Primitive, (i32, String)>
-where
-    F: FnOnce(*mut c_void, extern "C" fn(*mut c_void, *const FfiResult, T)),
-    T: RawToPrimitive,
-{
-    let (tx, rx) = std::sync::mpsc::channel::<Result<T::Primitive, (i32, String)>>();
-    let txp = &tx as *const _ as *mut c_void;
-
-    f(txp, cb::<T>);
-
-    rx.recv().unwrap()
-}
-
-extern "C" fn cb<T>(user_data: *mut c_void, res: *const FfiResult, o_arg: T)
-where
-    T: RawToPrimitive,
-{
-    let tx = user_data as *mut mpsc::Sender<Result<T::Primitive, (i32, String)>>;
-
-    unsafe {
-        (*tx)
-            .send(match (*res).error_code {
-                0 => Ok(o_arg.to_rust()),
-                _ => Err((
-                    (*res).error_code,
-                    String::from(CStr::from_ptr((*res).description).to_str().unwrap()),
-                )),
-            })
-            .unwrap();
-    }
 }
 
 impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<*const App> {
@@ -134,11 +100,11 @@ impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<CString> {
     }
 }
 
-struct SafeTask<T>(Box<Fn() -> Result<T, (i32, String)> + Send>);
+struct SafeTask<T>(Box<Fn() -> Result<T, i32> + Send>);
 
 impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
     type Output = Wrapper<T>;
-    type Error = (i32, String);
+    type Error = i32;
     type JsEvent = T::Js;
 
     fn perform(&self) -> Result<Self::Output, Self::Error> {
@@ -157,50 +123,15 @@ impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
         match result {
             Ok(res) => Ok(res.0.to_js(&mut cx)),
             Err(err) => {
-                let js_err = cx.error(err.1).unwrap();
+                let js_err = cx.error("SAFE API ERROR").unwrap();
 
                 // Add an `error_code` property to Error
-                let code = cx.number(err.0);
+                let code = cx.number(err);
                 js_err.set(&mut cx, "error_code", code).unwrap();
 
                 cx.throw(js_err)
             }
         }
-    }
-}
-
-trait RawToPrimitive {
-    type Primitive;
-
-    fn to_rust(self) -> Self::Primitive;
-}
-impl RawToPrimitive for u64 {
-    type Primitive = u64;
-
-    fn to_rust(self) -> Self::Primitive {
-        self
-    }
-}
-impl<T> RawToPrimitive for *mut T {
-    type Primitive = *mut T;
-
-    fn to_rust(self) -> Self::Primitive {
-        self
-    }
-}
-impl RawToPrimitive for *const [u8; 32] {
-    type Primitive = [u8; 32];
-
-    fn to_rust(self) -> Self::Primitive {
-        (unsafe { *self }) as [u8; 32]
-    }
-}
-use std::os::raw::c_char;
-impl RawToPrimitive for *const c_char {
-    type Primitive = String;
-
-    fn to_rust(self) -> Self::Primitive {
-        unsafe { CStr::from_ptr(self) }.to_str().unwrap().to_owned()
     }
 }
 

@@ -20,7 +20,7 @@ fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let jsf = cx.argument::<JsFunction>(1)?;
 
     SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { test_create_app(app.0.as_ptr(), ud, cb) })
+        join_cb(|ud, cb| unsafe { test_create_app(app.as_ptr(), ud, cb) })
     }))
     .schedule(jsf);
 
@@ -36,7 +36,7 @@ fn app_container_name_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let jsf = cx.argument::<JsFunction>(1)?;
 
     SafeTask(Box::new(move || {
-        join_cb(|ud, cb| unsafe { app_container_name(app.0.as_ptr(), ud, cb) })
+        join_cb(|ud, cb| unsafe { app_container_name(app.as_ptr(), ud, cb) })
     }))
     .schedule(jsf);
 
@@ -155,7 +155,7 @@ impl<T: PrimitiveToJs + 'static> Task for SafeTask<T> {
         result: Result<Self::Output, Self::Error>,
     ) -> JsResult<Self::JsEvent> {
         match result {
-            Ok(app) => Ok(app.0.to_js(&mut cx)),
+            Ok(res) => Ok(res.0.to_js(&mut cx)),
             Err(err) => {
                 let js_err = cx.error(err.1).unwrap();
 
@@ -206,6 +206,14 @@ impl RawToPrimitive for *const c_char {
 
 struct Wrapper<T>(T);
 unsafe impl<T> Send for Wrapper<T> {}
+
+impl<T> std::ops::Deref for Wrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
 
 trait PrimitiveToJs {
     type Js: Value;

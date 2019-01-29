@@ -33,3 +33,10 @@ const safe = require('safe_app_node');
 
 safe.app_is_mock(); // returns boolean
 ```
+
+## Type conversions
+
+| JavaScript	| Rust 		| FFI (C ABI)	|
+| -------------	| -------------	| -------------	|
+| `String`	| `String` 	| `*const c_char` |
+| `ArrayBuffer` | `*mut T`	| `*mut T`	|

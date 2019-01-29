@@ -8,96 +8,45 @@ use ffi_utils::test_utils::call_1;
 use neon::prelude::*;
 use safe_app::ffi::app_container_name;
 use safe_app::ffi::crypto::app_pub_enc_key;
+use safe_app::ffi::crypto::app_pub_sign_key;
 use safe_app::ffi::crypto::enc_pub_key_get;
 use safe_app::ffi::object_cache::EncryptPubKeyHandle;
 use safe_app::ffi::test_utils::test_create_app;
 use safe_app::App;
+use safe_core::ffi::arrays::AsymPublicKey;
 use std::ffi::CString;
 
-fn test_create_app_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let app = Wrapper::<CString>::from((&mut cx, 0));
-    let jsf = cx.argument::<JsFunction>(1)?;
-
-    SafeTask(Box::new(move || unsafe {
-        call_1::<_, _, *mut App>(|ud, cb| test_create_app(app.as_ptr(), ud, cb))
-    }))
-    .schedule(jsf);
-
-    Ok(JsUndefined::new())
+macro_rules! replace_expr {
+    ($_t:tt $sub:expr) => {
+        $sub
+    };
 }
+macro_rules! bind_ffi {
+    ($fn:ident, $fnj:ident, $fnr:ty $(, $argt:ty;$argi:expr;$argv:ident;$argd:expr)*) => {
+        fn $fnj(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+            $(
+                let $argv = Wrapper::<$argt>::from((&mut cx, $argi));
+            )*
+            let jsf = cx.argument::<JsFunction>(0i32 $(+ replace_expr!($argi 1i32))*)?;
+
+            SafeTask(Box::new(move || unsafe {
+                call_1::<_, _, $fnr>(|ud, cb| $fn($($argd, )* ud, cb))
+            }))
+            .schedule(jsf);
+
+            Ok(JsUndefined::new())
+        }
+    };
+}
+
+bind_ffi!(app_pub_sign_key, app_pub_sign_key_js, u64, *const App;0;a;*a);
+bind_ffi!(app_container_name, app_container_name_js, String, CString;0;a;a.as_ptr());
+bind_ffi!(test_create_app, test_create_app_js, *mut App, CString;0;a;a.as_ptr());
+bind_ffi!(app_pub_enc_key, app_pub_enc_key_js, EncryptPubKeyHandle, *const App;0;a;*a);
+bind_ffi!(enc_pub_key_get, enc_pub_key_get_js, AsymPublicKey, *const App;0;a;*a, EncryptPubKeyHandle;1;b;*b);
 
 fn app_is_mock_js(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     Ok(cx.boolean(safe_app::app_is_mock()))
-}
-
-fn app_container_name_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let app = Wrapper::<CString>::from((&mut cx, 0));
-    let jsf = cx.argument::<JsFunction>(1)?;
-
-    SafeTask(Box::new(move || unsafe {
-        call_1::<_, _, String>(|ud, cb| app_container_name(app.as_ptr(), ud, cb))
-    }))
-    .schedule(jsf);
-
-    Ok(JsUndefined::new())
-}
-
-fn app_pub_enc_key_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let app = Wrapper::<*const App>::from((&mut cx, 0));
-    let jsf = cx.argument::<JsFunction>(1)?;
-
-    SafeTask(Box::new(move || unsafe {
-        call_1::<_, _, EncryptPubKeyHandle>(|ud, cb| app_pub_enc_key(app.0, ud, cb))
-    }))
-    .schedule(jsf);
-
-    Ok(JsUndefined::new())
-}
-
-fn enc_pub_key_get_js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let app = Wrapper::<*const App>::from((&mut cx, 0));
-    let key = Wrapper::<u64>::from((&mut cx, 1));
-    let jsf = cx.argument::<JsFunction>(2)?;
-
-    SafeTask(Box::new(move || unsafe {
-        call_1::<_, _, [u8; 32]>(|ud, cb| enc_pub_key_get(app.0, key.0, ud, cb))
-    }))
-    .schedule(jsf);
-
-    Ok(JsUndefined::new())
-}
-
-impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<*const App> {
-    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<*const App> {
-        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
-        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
-
-        let mut x = [0u8; std::mem::size_of::<usize>()];
-        x.copy_from_slice(app);
-
-        Wrapper(usize::from_ne_bytes(x) as *const App)
-    }
-}
-
-impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<u64> {
-    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<u64> {
-        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
-        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
-
-        let mut x = [0u8; std::mem::size_of::<u64>()];
-        x.copy_from_slice(app);
-
-        Wrapper(u64::from_ne_bytes(x))
-    }
-}
-
-impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<CString> {
-    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<CString> {
-        let s = ci.0.argument::<JsString>(ci.1).unwrap().value();
-        let s = CString::new(s.clone()).expect("CString::new failed");
-
-        Wrapper(s)
-    }
 }
 
 struct SafeTask<T>(Box<Fn() -> Result<T, i32> + Send>);
@@ -143,6 +92,39 @@ impl<T> std::ops::Deref for Wrapper<T> {
 
     fn deref(&self) -> &T {
         &self.0
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<*const App> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<*const App> {
+        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
+        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
+
+        let mut x = [0u8; std::mem::size_of::<usize>()];
+        x.copy_from_slice(app);
+
+        Wrapper(usize::from_ne_bytes(x) as *const App)
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<u64> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<u64> {
+        let app = ci.0.argument::<JsArrayBuffer>(ci.1).unwrap();
+        let app = ci.0.borrow(&app, |b| b.as_slice::<u8>());
+
+        let mut x = [0u8; std::mem::size_of::<u64>()];
+        x.copy_from_slice(app);
+
+        Wrapper(u64::from_ne_bytes(x))
+    }
+}
+
+impl<'a> From<(&mut FunctionContext<'a>, i32)> for Wrapper<CString> {
+    fn from(ci: (&mut FunctionContext<'a>, i32)) -> Wrapper<CString> {
+        let s = ci.0.argument::<JsString>(ci.1).unwrap().value();
+        let s = CString::new(s.clone()).expect("CString::new failed");
+
+        Wrapper(s)
     }
 }
 
@@ -202,6 +184,7 @@ register_module!(mut cx, {
     cx.export_function("app_pub_enc_key", app_pub_enc_key_js)?;
     cx.export_function("enc_pub_key_get", enc_pub_key_get_js)?;
     cx.export_function("test_create_app", test_create_app_js)?;
+    cx.export_function("app_pub_sign_key", app_pub_sign_key_js)?;
 
     Ok(())
 });
